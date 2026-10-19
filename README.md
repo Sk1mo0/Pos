@@ -1,34 +1,56 @@
-# CarritoControl — frontend demo
+# CarritoControl
 
-Prototipo local inspirado en la navegación por categorías de Rappi y Uber Eats, adaptado a un punto de venta. Sin dependencias de JavaScript ni instalación. El alcance actual es exclusivamente frontend, según la solicitud; no se implementaron todavía Next.js, PostgreSQL, Prisma, autenticación ni pagos reales del plan completo.
+Punto de venta con Next.js App Router, React, TypeScript, Tailwind CSS y Prisma/PostgreSQL. Usar Bun y conservar `bun.lock` como único lockfile.
 
 ## Arranque
 
-Desde este directorio:
+Configurar `.env` con `DATABASE_URL="postgresql://usuario:contraseña@servidor/base?sslmode=require"`. La conexión se usa exclusivamente en el servidor.
 
 ```sh
-cd frontend
-python3 -m http.server 5173 --bind 127.0.0.1
+bun install
+bun run db:generate
+bun run db:migrate
+bun run db:seed
+bun run dev
 ```
 
-Abrir http://127.0.0.1:5173. También puedes ejecutar `bun run dev` desde `frontend` si tienes Bun y Python 3 instalados. Se requiere navegador moderno. Las fuentes de Google son opcionales: sin red se usan fuentes del sistema.
+El seed agrega los dos negocios y los 16 productos iniciales sin sobrescribir registros existentes. Ejecutarlo nuevamente vuelve a crear los productos iniciales que se hayan eliminado.
 
-## Seed y recorrido
+## Subpáginas
 
-`frontend/seed.js` contiene dos negocios ficticios y 16 productos. Se carga automáticamente en la primera visita; no requiere comando ni base de datos. Ventas, caja y pedidos se guardan en localStorage por navegador. «Reiniciar demo» permite volver al estado inicial después de confirmarlo.
+- `/venta`: catálogo de venta, pedido, extras, cobro y ticket.
+- `/catalogo`: crear, consultar, editar y eliminar productos por negocio.
+- `/historial`: consultar tickets, editar notas y referencias, eliminar ventas del turno abierto.
+- `/caja`: abrir turno, editar fondo, eliminar turnos sin ventas, cerrar y consultar arqueos.
+- `/reportes`: importes, pedidos, ticket promedio, métodos de pago y exportación CSV.
 
-1. En Caja, abrir turno con $500 de fondo.
-2. En Vender, agregar tacos, seleccionar extras y escribir notas.
-3. Ajustar cantidades, seleccionar Mostrador o Para llevar y cobrar en efectivo. Introducir el importe recibido; se calcula el cambio.
-4. Consultar e imprimir el ticket; también está disponible en Historial.
-5. Realizar otra venta con Digital simulado. Probar rechazo o vencimiento y reintentar: el pedido se conserva.
-6. Revisar Reportes y exportar CSV. Cerrar caja introduciendo el efectivo contado y un motivo si hay diferencia.
-7. Cambiar al segundo negocio desde el selector superior para probar su catálogo y caja independientes.
+La navegación conserva el pedido. Solamente el borrador del pedido y el negocio seleccionado se guardan en localStorage (`carrito-local-v2-draft`). Productos, ventas y turnos se guardan en PostgreSQL. Los registros de la demo anterior no se importan automáticamente.
 
-Los reportes incluyen todas las ventas demo del negocio seleccionado, sin filtro de fechas. Efectivo esperado = fondo inicial + ventas en efectivo del turno. Los pagos digitales y externos no suman efectivo. Los reportes no representan utilidad ni impuestos.
+## Reglas
 
-## Límites y verificación
+En el catálogo se selecciona **Por unidad** o **Por gramaje**. El precio corresponde a una unidad o a 1 kg, respectivamente. Al vender se indica la cantidad de unidades o el peso en gramos enteros (mínimo 1 g). El carrito permite ajustar el gramaje y el ticket conserva la modalidad, cantidad y precio originales. Los productos existentes siguen por unidad hasta que se editen.
 
-No hay servidor de negocio: precios, roles y datos locales son manipulables. No hay aislamiento de seguridad, login, CRUD, gastos, movimientos manuales, integración bancaria ni validación de permisos. El pago externo es una confirmación manual y el digital es exclusivamente simulado. No usar con operaciones reales. La seed es frontend; no acredita la seed PostgreSQL exigida en el plan.
+Los importes se almacenan en centavos. Para gramaje se calcula `precio por kg × gramos / 1000`, redondeando cada renglón a centavos antes de sumar. Los extras se cobran con la misma base del producto. El servidor consulta los precios, valida extras y cantidades, calcula total y cambio y asigna folios únicos por negocio. Las operaciones de un negocio se serializan mediante una transacción y bloqueo de fila para evitar carreras entre cobro y cierre. Reintentar el mismo identificador de venta no duplica el registro.
 
-La validación sintáctica se ejecuta con `node --check frontend/app.js` y `node --check frontend/seed.js`. La interfaz incluye adaptación a móvil y escritorio. Consultar PLAN_CODEX.md para pendientes de la implementación completa.
+Los tickets conservan los productos y precios vendidos aunque el catálogo cambie. Una venta de turno abierto permite editar nota y referencia o eliminarse; sus importes y productos no son editables después de cobrar. Los turnos cerrados y sus ventas quedan protegidos. Un turno con ventas no se puede eliminar. El cierre calcula el efectivo esperado en el servidor y exige motivo cuando existe diferencia.
+
+El pago digital sigue siendo simulado y el externo se confirma manualmente. Los tickets no son comprobantes fiscales. No hay autenticación ni roles; esta aplicación todavía requiere ese control antes de exponerse a usuarios externos.
+
+## API
+
+`GET /api/state` carga catálogo, ventas y turnos. `/api/products`, `/api/sales` y `/api/shifts` admiten GET y POST; sus rutas `/:id` admiten GET, PATCH y DELETE. GET recibe `?business=tacos` o `?business=tienda`; las escrituras reciben `business` en JSON. Las validaciones y restricciones también se aplican al acceso directo a la API.
+
+## Verificación
+
+```sh
+bun run check
+bun run lint
+bun run build
+bun run start
+bun test tests/pricing.test.ts
+bun run test:integration
+```
+
+La prueba de integración usa la base configurada y crea registros temporales que limpia por identificador al finalizar. Comprueba CRUD, aislamiento entre negocios, rechazo de importes inválidos, cálculo de cambio, idempotencia y protección de cierres. Si la tienda tiene un turno abierto, omite las pruebas de ventas y caja para preservar ese turno. Los folios consumidos en la prueba no se reutilizan.
+
+`prisma/schema.prisma` define los modelos y `prisma/migrations` conserva el esquema versionado. `app/point-of-sale.tsx` contiene el contenedor compartido y cobro; `app/pos-context.tsx` comparte estado; `app/pos-pages.tsx` y `app/managers.tsx` contienen vistas y formularios; `lib/pos-api.ts` implementa las operaciones de servidor.

@@ -1,0 +1,60 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+datasource db {
+  provider = "postgresql"
+}
+model Business {
+  id       String @id
+  name     String
+  sequence Int @default(0)
+  products Product[]
+  shifts   Shift[]
+  sales    Sale[]
+}
+model Product {
+  id          String @id @default(cuid())
+  business    String
+  shop        Business @relation(fields: [business], references: [id])
+  name        String
+  description String
+  price       Int
+  unit        String @default("unit")
+  category    String
+  emoji       String
+  @@index([business])
+}
+model Shift {
+  id         String @id @default(cuid())
+  business   String
+  shop       Business @relation(fields: [business], references: [id])
+  fund       Int
+  opened     DateTime @default(now())
+  closed     DateTime?
+  expected   Int?
+  counted    Int?
+  difference Int?
+  reason     String @default("")
+  sales      Sale[]
+  @@index([business, closed])
+}
+model Sale {
+  id        String @id @default(cuid())
+  business  String
+  shop      Business @relation(fields: [business], references: [id])
+  number    String
+  shift     String
+  session   Shift @relation(fields: [shift], references: [id])
+  items     Json
+  total     Int
+  received  Int
+  change    Int
+  method    String
+  reference String @default("")
+  mode      String
+  note      String @default("")
+  date      DateTime @default(now())
+  @@unique([business, number])
+  @@index([business, date])
+}
