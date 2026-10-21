@@ -1,7 +1,7 @@
 "use client";
 import { createContext, useContext } from "react";
 import type { Modal } from "./point-of-sale";
-import type { State, Shop, Product } from "./pos-data";
+import type { State, Shop, Product, Sale } from "./pos-data";
 export const PosContext = createContext<PosContextValue | null>(null);
 type PosContextValue = {
     state: State;
@@ -27,6 +27,7 @@ type PosContextValue = {
         id?: string,
     ) => Promise<unknown>;
     refresh: () => Promise<void>;
+    acceptPayment: (sale: Sale) => Promise<void>;
     busy: boolean;
     setMessage: (message: string) => void;
 };

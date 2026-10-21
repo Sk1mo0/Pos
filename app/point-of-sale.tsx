@@ -16,9 +16,11 @@ import {
 } from "@/components/ui/dialog";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
+import { paymentRequest } from "./mercado-pago-client";
 import { ErrorAlert } from "./ui-feedback";
 
 import {
+    useCallback,
     useEffect,
     useRef,
     useState,
@@ -46,13 +48,14 @@ import {
     type State,
 } from "./pos-data";
 
-const methods = ["Efectivo", "Digital simulado", "Externo manual"];
+const methods = ["Efectivo", "Mercado Pago", "Externo manual"];
 const navigation = [
     ["venta", "▦", "Vender"],
     ["historial", "◷", "Historial"],
     ["catalogo", "▣", "Catálogo"],
     ["caja", "▤", "Caja"],
     ["reportes", "↗", "Reportes"],
+    ["pagos", "$", "Pagos"],
 ];
 export type Modal =
     | { kind: "product"; product: Product }
@@ -148,6 +151,8 @@ function Workspace({ children }: { children: ReactNode }) {
             } catch {
                 /* An invalid local draft does not prevent database loading. */
             }
+            const returnedBusiness = new URL(window.location.href).searchParams.get("business");
+            if (returnedBusiness === "tacos" || returnedBusiness === "tienda") setState(previous => ({ ...previous, business: returnedBusiness }));
             refresh().catch((error) => setLoadError(error.message));
         }, 0);
         const shortcut = (e: KeyboardEvent) => {
@@ -213,6 +218,22 @@ function Workspace({ children }: { children: ReactNode }) {
                 .includes(query.toLowerCase()),
     );
 
+    const acceptPayment = useCallback(async (sale: Sale) => {
+        const fingerprint = (items: Item[]) => JSON.stringify(items.map(item => ({ id: item.id, qty: item.qty, unit: item.unit, extras: item.extras, note: item.note })));
+        let pendingId: string | null = null;
+        try {
+            pendingId = localStorage.getItem(`mp-draft-${sale.business}`);
+            if (pendingId === sale.id) localStorage.removeItem(`mp-draft-${sale.business}`);
+        } catch { /* No storage: preserve the draft. */ }
+        setState(previous => {
+            const current = previous.shops[sale.business];
+            const sameDraft = pendingId === sale.id && fingerprint(current.cart) === fingerprint(sale.items) && current.note === sale.note && current.mode === sale.mode;
+            return { ...previous, shops: { ...previous.shops, [sale.business]: { ...current,
+                ...(sameDraft ? { cart: [], note: "" } : {}),
+                sales: [...current.sales.filter(item => item.id !== sale.id), sale],
+            } } };
+        });
+    }, []);
     async function completeSale(sale: Sale) {
         const saved = await mutate("sales", "POST", sale);
         setState((previous) => ({
@@ -266,6 +287,7 @@ function Workspace({ children }: { children: ReactNode }) {
         navigate,
         mutate,
         refresh,
+        acceptPayment,
         busy,
         setMessage,
     };
@@ -395,6 +417,7 @@ function Operation({
     add,
     sold,
     update,
+    close,
 }: {
     modal: Modal;
     state: State;
@@ -439,13 +462,12 @@ function Operation({
                     note: String(form.get("note") || ""),
                 });
             } else if (modal.kind === "pay" && shop.shift && shop.cart.length) {
-                if (
-                    method === "Digital simulado" &&
-                    form.get("outcome") !== "Aprobado"
-                ) {
-                    setError(
-                        `Pago ${String(form.get("outcome")).toLowerCase()}. Conservamos tu pedido; reintenta o elige otro método.`,
-                    );
+                if (method === "Mercado Pago") {
+                    try { localStorage.setItem(`mp-draft-${state.business}`, saleId); } catch { /* Payment recovery still works without draft storage. */ }
+                    const result = await paymentRequest<{ id: string; checkoutUrl: string }>("checkout", state.business, {
+                        id: saleId, items: shop.cart, total, mode: shop.mode, note: shop.note,
+                    });
+                    window.location.assign(result.checkoutUrl);
                     return;
                 }
                 const amount =
@@ -624,26 +646,11 @@ function Operation({
                                 )}
                             </p>
                         </>
-                    ) : method === "Digital simulado" ? (
-                        <>
-                            <Label htmlFor="outcome">
-                                Resultado de simulación
-                            </Label>
-                            <NativeSelect
-                                className="w-full"
-                                id="outcome"
-                                name="outcome"
-                            >
-                                <NativeSelectOption>
-                                    Aprobado
-                                </NativeSelectOption>
-                                <NativeSelectOption>
-                                    Rechazado
-                                </NativeSelectOption>
-                                <NativeSelectOption>Vencido</NativeSelectOption>
-                            </NativeSelect>
-                            <p>Demostración sin conexión bancaria.</p>
-                        </>
+                    ) : method === "Mercado Pago" ? (
+                        <div className="grid gap-3">
+                            <p>Completa el pago en Mercado Pago. El ticket se generará cuando se confirme el cobro; tu pedido se conserva mientras tanto.</p>
+                            <Link href="/pagos" onClick={() => close()}>Conectar cuenta o revisar cobros pendientes</Link>
+                        </div>
                     ) : (
                         <>
                             <Label htmlFor="reference">
@@ -668,7 +675,7 @@ function Operation({
                         size="lg"
                         disabled={pending}
                     >
-                        Confirmar venta
+                        {method === "Mercado Pago" ? "Ir a Mercado Pago" : "Confirmar venta"}
                     </Button>
                 </form>
             </>

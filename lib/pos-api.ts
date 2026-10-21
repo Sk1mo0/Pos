@@ -5,11 +5,11 @@ import { Prisma } from '../generated/prisma/client';
 const businessSchema = z.enum(['tacos', 'tienda']);
 const cents = z.number().int().min(0).max(100000000);
 const text = z.string().trim().max(500);
-const method = z.enum(['Efectivo', 'Digital simulado', 'Externo manual']);
+const method = z.enum(['Efectivo', 'Externo manual']);
 const unit = z.enum(['unit', 'weight']);
 const productSchema = z.object({ name: text.min(1), description: text, price: cents, unit: unit.default('unit'), category: text.min(1), emoji: z.string().trim().min(1).max(16) });
-const saleSchema = z.object({ id: z.string().min(1).max(100), items: z.array(z.object({ id: z.string(), qty: z.number().int().min(1).max(999000), unit: unit.default('unit'), extras: z.array(z.enum(['Queso', 'Aguacate'])).max(2).refine(v => new Set(v).size === v.length), note: text })).min(1).max(100), received: cents, method, reference: text, mode: z.enum(['Mostrador', 'Para llevar']), note: text });
-class HttpError extends Error { constructor(public status: number, message: string) { super(message); } }
+export const saleSchema = z.object({ id: z.string().min(1).max(100), items: z.array(z.object({ id: z.string(), qty: z.number().int().min(1).max(999000), unit: unit.default('unit'), extras: z.array(z.enum(['Queso', 'Aguacate'])).max(2).refine(v => new Set(v).size === v.length), note: text })).min(1).max(100), received: cents, method, reference: text, mode: z.enum(['Mostrador', 'Para llevar']), note: text });
+export class HttpError extends Error { constructor(public status: number, message: string) { super(message); } }
 function fail(message: string): never { throw new HttpError(409, message); }
 async function snapshot() {
   const [products, sales, shifts] = await Promise.all([prisma.product.findMany({ orderBy: { name: 'asc' } }), prisma.sale.findMany({ orderBy: { date: 'asc' } }), prisma.shift.findMany({ orderBy: { opened: 'asc' } })]);
@@ -50,17 +50,8 @@ export async function handle(request: Request, context: { params: Promise<{ reso
           const existing = await tx.sale.findUnique({ where: { id: data.id } });
           if (existing) { if (existing.business !== business) fail('Identificador de venta ocupado.'); return existing; }
           if (!active) fail('Abre la caja antes de cobrar.');
-          const items = await Promise.all(data.items.map(async item => {
-            const product = await tx.product.findFirst({ where: { id: item.id, business } });
-            if (!product) fail('Un producto ya no está disponible. Actualiza el pedido.');
-            if (item.unit !== product.unit) fail('La modalidad del producto cambió. Retíralo del pedido y agrégalo de nuevo.');
-            if (item.qty > quantityLimit(product.unit)) fail('La cantidad excede el límite permitido.');
-            if (item.extras.length && !['Tacos', 'Antojitos'].includes(product.category)) fail('Extras no disponibles para este producto.');
-            return { ...product, qty: item.qty, extras: item.extras, note: item.note, price: product.price + item.extras.reduce((sum, extra) => sum + (extra === 'Queso' ? 1000 : 1500), 0) };
-          }));
-          const total = items.reduce((sum, item) => sum + itemTotal(item), 0);
-          if (!Number.isSafeInteger(total) || total > 100000000) fail('El total excede el límite permitido.');
-          if (total !== input.total) fail('Los precios cambiaron. Actualiza el pedido antes de cobrar.');
+          if (await tx.paymentOrder.count({ where: { business, status: 'pending' } })) fail('Resuelve el cobro pendiente de Mercado Pago en Pagos antes de realizar otra venta.');
+          const { items, total } = await priceSale(tx, business, data.items, input.total);
           const received = data.method === 'Efectivo' ? data.received : total;
           if (received < total) fail('El efectivo recibido es insuficiente.');
           const shop = await tx.business.update({ where: { id: business }, data: { sequence: { increment: 1 } } });
@@ -68,6 +59,7 @@ export async function handle(request: Request, context: { params: Promise<{ reso
         }
         const sale = await tx.sale.findFirst({ where: { id, business } });
         if (!sale) throw new HttpError(404, 'Venta no encontrada.');
+        if (sale.method === 'Mercado Pago' && (request.method === 'DELETE' || input.reference !== sale.reference)) fail('Los pagos de Mercado Pago conservan su referencia y no se pueden eliminar.');
         if (sale.shift !== active?.id) fail('Las ventas de turnos cerrados no se pueden modificar.');
         if (request.method === 'DELETE') return tx.sale.delete({ where: { id } });
         const data = z.object({ note: text, reference: text }).parse(input);
@@ -80,6 +72,7 @@ export async function handle(request: Request, context: { params: Promise<{ reso
       const shift = await tx.shift.findFirst({ where: { id, business } });
       if (!shift) throw new HttpError(404, 'Turno no encontrado.');
       if (shift.closed) fail('El turno ya está cerrado.');
+      if ((request.method === 'DELETE' || input.action === 'close') && await tx.paymentOrder.count({ where: { business, shift: id, status: 'pending' } })) fail('Hay cobros de Mercado Pago pendientes. Revísalos en Pagos antes de cerrar o eliminar la caja.');
       const sales = await tx.sale.findMany({ where: { shift: id } });
       if (request.method === 'DELETE') {
         if (sales.length) fail('No se puede eliminar un turno con ventas.');
@@ -101,4 +94,19 @@ export async function handle(request: Request, context: { params: Promise<{ reso
     console.error('POS database operation failed:', error instanceof Error ? error.name : 'Unknown error');
     return Response.json({ error: 'No fue posible acceder a la base de datos. Intenta de nuevo.' }, { status: 503 });
   }
+}
+
+export async function priceSale(tx: Prisma.TransactionClient, business: string, inputItems: z.infer<typeof saleSchema>["items"], expectedTotal: unknown) {
+  const items = await Promise.all(inputItems.map(async item => {
+    const product = await tx.product.findFirst({ where: { id: item.id, business } });
+    if (!product) fail('Un producto ya no está disponible. Actualiza el pedido.');
+    if (item.unit !== product.unit) fail('La modalidad del producto cambió. Retíralo del pedido y agrégalo de nuevo.');
+    if (item.qty > quantityLimit(product.unit)) fail('La cantidad excede el límite permitido.');
+    if (item.extras.length && !['Tacos', 'Antojitos'].includes(product.category)) fail('Extras no disponibles para este producto.');
+    return { ...product, qty: item.qty, extras: item.extras, note: item.note, price: product.price + item.extras.reduce((sum, extra) => sum + (extra === 'Queso' ? 1000 : 1500), 0) };
+  }));
+  const total = items.reduce((sum, item) => sum + itemTotal(item), 0);
+  if (!Number.isSafeInteger(total) || total > 100000000) fail('El total excede el límite permitido.');
+  if (total !== expectedTotal) fail('Los precios cambiaron. Actualiza el pedido antes de cobrar.');
+  return { items, total };
 }

@@ -12,6 +12,8 @@ model Business {
   products Product[]
   shifts   Shift[]
   sales    Sale[]
+  mercadoPago MercadoPagoConnection?
+  paymentOrders PaymentOrder[]
 }
 model Product {
   id          String @id @default(cuid())
@@ -57,4 +59,37 @@ model Sale {
   date      DateTime @default(now())
   @@unique([business, number])
   @@index([business, date])
+}
+
+model MercadoPagoConnection {
+  business String @id
+  shop Business @relation(fields: [business], references: [id])
+  sellerId String
+  credentials String
+  expiresAt DateTime
+  connectedAt DateTime @default(now())
+}
+model PaymentOrder {
+  id String @id
+  business String
+  shop Business @relation(fields: [business], references: [id])
+  sellerId String
+  shift String
+  items Json
+  total Int
+  mode String
+  note String
+  preferenceId String? @unique
+  checkoutUrl String?
+  status String @default("pending")
+  paymentId String? @unique
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  @@index([business, status])
+}
+model MercadoPagoOAuth {
+  id String @id
+  business String
+  verifier String
+  expiresAt DateTime
 }
