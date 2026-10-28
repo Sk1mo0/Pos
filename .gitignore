@@ -41,3 +41,8 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 /generated/prisma/
+
+#agents
+.agents/skills/prisma-*/
+.claude/skills/prisma-*
+.windsurf/skills/prisma-*
